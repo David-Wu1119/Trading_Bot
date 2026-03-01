@@ -54,14 +54,28 @@ class TestSessionPipeline(unittest.TestCase):
 
         # Process first tick through MAM
         mam_edge1, mam_conf1 = self.mam.predict(tick1)
-        self.assertNotEqual(mam_edge1, 0)
-        self.assertGreaterEqual(mam_conf1, 0.55)
-        self.assertLessEqual(mam_conf1, 0.9)
+        self.assertEqual(mam_edge1, 0)
+        self.assertEqual(mam_conf1, 0)
+
+        # Warm up MAM so it emits a real signal.
+        warm_edge, warm_conf = self.mam.predict(tick2)
+        for i in range(3, 36):
+            tick = Mock()
+            tick.symbol = "AAPL"
+            tick.bid_size = 1000 + i * 5
+            tick.ask_size = 800 + i * 5
+            tick.price = 175.0 + i * 0.1
+            tick.timestamp = f"2024-04-12 10:30:{i:02d}"
+            warm_edge, warm_conf = self.mam.predict(tick)
+
+        self.assertNotEqual(warm_edge, 0)
+        self.assertGreaterEqual(warm_conf, 0.55)
+        self.assertLessEqual(warm_conf, 0.9)
 
         # Combine signals in meta-learner
         alpha_signals = {
             "ob_pressure": (obp_edge1, obp_conf1),
-            "ma_momentum": (mam_edge1, mam_conf1),
+            "ma_momentum": (warm_edge, warm_conf),
         }
         meta_edge, meta_conf = self.meta.predict(alpha_signals, tick1)
         self.assertNotEqual(meta_edge, 0)

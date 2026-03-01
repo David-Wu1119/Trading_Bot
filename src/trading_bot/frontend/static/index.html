@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trading Desk Control</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="hero reveal">
+      <div>
+        <p class="eyebrow">Operator Console</p>
+        <h1>Trading Desk Control</h1>
+        <p class="subtitle">Production control plane for strategy execution, risk gating, and mission operations.</p>
+      </div>
+      <div class="hero-actions">
+        <button id="refresh-now" class="btn btn-secondary" type="button">Refresh Now</button>
+        <p id="last-updated" class="small-meta">Last update: --</p>
+      </div>
+    </header>
+
+    <section class="kpi-grid reveal stagger-1">
+      <article class="kpi-card">
+        <p class="kpi-label">Net P&amp;L</p>
+        <p id="kpi-net-pnl" class="kpi-value">--</p>
+      </article>
+      <article class="kpi-card">
+        <p class="kpi-label">Cost Ratio</p>
+        <p id="kpi-cost-ratio" class="kpi-value">--</p>
+      </article>
+      <article class="kpi-card">
+        <p class="kpi-label">Approval Rate</p>
+        <p id="kpi-approval-rate" class="kpi-value">--</p>
+      </article>
+      <article class="kpi-card">
+        <p class="kpi-label">Blocked Checks</p>
+        <p id="kpi-blocked" class="kpi-value">--</p>
+      </article>
+      <article class="kpi-card">
+        <p class="kpi-label">Ramp Decision</p>
+        <p id="kpi-ramp" class="kpi-value">--</p>
+      </article>
+      <article class="kpi-card">
+        <p class="kpi-label">Control API</p>
+        <p id="kpi-control" class="kpi-value">--</p>
+      </article>
+    </section>
+
+    <section class="grid reveal stagger-2">
+      <article class="panel">
+        <div class="panel-head">
+          <h2>System Status</h2>
+          <span id="heartbeat" class="pill pill-neutral">Checking</span>
+        </div>
+        <div class="metrics">
+          <div>
+            <span class="label">Control API</span>
+            <span id="control-state" class="value">Unknown</span>
+          </div>
+          <div>
+            <span class="label">Kill Switch</span>
+            <span id="kill-state" class="value">Unknown</span>
+          </div>
+          <div>
+            <span class="label">Missions</span>
+            <span id="mission-count" class="value">0</span>
+          </div>
+          <div>
+            <span class="label">Scratchpad Events</span>
+            <span id="trace-count" class="value">0</span>
+          </div>
+          <div>
+            <span class="label">Portfolio Value</span>
+            <span id="portfolio-value" class="value">--</span>
+          </div>
+          <div>
+            <span class="label">Portfolio PnL</span>
+            <span id="portfolio-pnl" class="value">--</span>
+          </div>
+        </div>
+      </article>
+
+      <article class="panel danger-panel">
+        <div class="panel-head">
+          <h2>Safety Controls</h2>
+          <span class="pill pill-danger">Guardrail</span>
+        </div>
+        <form id="kill-form" class="stack">
+          <label for="kill-reason">Kill Switch Reason</label>
+          <textarea id="kill-reason" required minlength="3" placeholder="Explain why trading must halt"></textarea>
+          <button class="btn btn-danger" type="submit">Activate Kill Switch</button>
+        </form>
+        <form id="reset-form" class="stack compact">
+          <label for="authorized-by">Authorized By</label>
+          <input id="authorized-by" required minlength="2" placeholder="operator-id">
+          <button class="btn btn-secondary" type="submit">Reset Kill Switch</button>
+        </form>
+      </article>
+    </section>
+
+    <section class="grid telemetry-grid reveal stagger-3">
+      <article class="panel">
+        <div class="panel-head">
+          <h2>Economic Snapshot</h2>
+          <span class="pill pill-accent">P&amp;L</span>
+        </div>
+        <div class="metrics compact-metrics">
+          <div>
+            <span class="label">Snapshot</span>
+            <span id="econ-timestamp" class="value">--</span>
+          </div>
+          <div>
+            <span class="label">Gross P&amp;L</span>
+            <span id="econ-gross" class="value">--</span>
+          </div>
+          <div>
+            <span class="label">Net P&amp;L</span>
+            <span id="econ-net" class="value">--</span>
+          </div>
+          <div>
+            <span class="label">Fees</span>
+            <span id="econ-fees" class="value">--</span>
+          </div>
+          <div>
+            <span class="label">Infra Cost</span>
+            <span id="econ-infra" class="value">--</span>
+          </div>
+          <div>
+            <span class="label">Margin</span>
+            <span id="econ-margin" class="value">--</span>
+          </div>
+        </div>
+        <h3>Top Assets</h3>
+        <div id="econ-assets" class="asset-list"></div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-head">
+          <h2>Ramp Decision</h2>
+          <span id="ramp-pill" class="pill pill-neutral">Unknown</span>
+        </div>
+        <div class="metrics compact-metrics">
+          <div>
+            <span class="label">Decision</span>
+            <span id="ramp-decision" class="value">--</span>
+          </div>
+          <div>
+            <span class="label">Entropy</span>
+            <span id="ramp-entropy" class="value">--</span>
+          </div>
+          <div>
+            <span class="label">Q-Spread Ratio</span>
+            <span id="ramp-qspread" class="value">--</span>
+          </div>
+          <div>
+            <span class="label">Drawdown</span>
+            <span id="ramp-drawdown" class="value">--</span>
+          </div>
+          <div>
+            <span class="label">Cost Ratio</span>
+            <span id="ramp-cost-ratio" class="value">--</span>
+          </div>
+          <div>
+            <span class="label">Cost Gate</span>
+            <span id="ramp-cost-pass" class="value">--</span>
+          </div>
+        </div>
+        <h3>Reasons</h3>
+        <ul id="ramp-reasons" class="reason-list"></ul>
+      </article>
+
+      <article class="panel">
+        <div class="panel-head">
+          <h2>Live Market</h2>
+          <span class="pill pill-accent">Streaming</span>
+        </div>
+        <div class="metrics compact-metrics">
+          <div>
+            <span class="label">Snapshot</span>
+            <span id="market-timestamp" class="value">--</span>
+          </div>
+          <div>
+            <span class="label">Session Value</span>
+            <span id="live-session-value" class="value">--</span>
+          </div>
+          <div>
+            <span class="label">Session P&amp;L</span>
+            <span id="live-session-pnl" class="value">--</span>
+          </div>
+          <div>
+            <span class="label">Unrealized</span>
+            <span id="live-session-unrealized" class="value">--</span>
+          </div>
+          <div>
+            <span class="label">Realized</span>
+            <span id="live-session-realized" class="value">--</span>
+          </div>
+          <div>
+            <span class="label">Fees</span>
+            <span id="live-session-fees" class="value">--</span>
+          </div>
+        </div>
+        <h3>Current Prices</h3>
+        <div id="live-price-list" class="asset-list"></div>
+        <h3>Recent Trade Tape</h3>
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Symbol</th>
+                <th>Side</th>
+                <th>Qty</th>
+                <th>Status</th>
+                <th>Source</th>
+                <th>Reason</th>
+              </tr>
+            </thead>
+            <tbody id="live-trade-body"></tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-head">
+          <h2>Trading Advisor</h2>
+          <span id="advisor-posture-pill" class="pill pill-neutral">Unknown</span>
+        </div>
+        <div class="metrics compact-metrics">
+          <div>
+            <span class="label">Portfolio Posture</span>
+            <span id="advisor-posture" class="value">--</span>
+          </div>
+          <div>
+            <span class="label">Portfolio Action</span>
+            <span id="advisor-action" class="value">--</span>
+          </div>
+          <div>
+            <span class="label">Posture Score</span>
+            <span id="advisor-score" class="value">--</span>
+          </div>
+          <div>
+            <span class="label">Updated</span>
+            <span id="advisor-timestamp" class="value">--</span>
+          </div>
+        </div>
+        <h3>Posture Reasons</h3>
+        <ul id="advisor-reasons" class="reason-list"></ul>
+        <h3>Acceptance Gates</h3>
+        <div id="advisor-gates" class="asset-list"></div>
+        <h3>Advisor Quality</h3>
+        <div class="metrics compact-metrics">
+          <div>
+            <span class="label">Decision Lock</span>
+            <span id="advisor-decision-lock" class="value">--</span>
+          </div>
+          <div>
+            <span class="label">Evaluated</span>
+            <span id="advisor-evaluated" class="value">--</span>
+          </div>
+          <div>
+            <span class="label">Hit Rate</span>
+            <span id="advisor-hit-rate" class="value">--</span>
+          </div>
+          <div>
+            <span class="label">Weighted Hit Rate</span>
+            <span id="advisor-weighted-hit-rate" class="value">--</span>
+          </div>
+        </div>
+        <h3>Notification Events</h3>
+        <div id="advisor-notifications" class="asset-list"></div>
+        <h3>Symbol Recommendations</h3>
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Price</th>
+                <th>Trend</th>
+                <th>Rec</th>
+                <th>Confidence</th>
+                <th>Age</th>
+                <th>Why</th>
+              </tr>
+            </thead>
+            <tbody id="advisor-table-body"></tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+
+    <section class="grid reveal stagger-4">
+      <article class="panel panel-wide">
+        <div class="panel-head">
+          <h2>Exposure Decision Tape</h2>
+          <span class="pill pill-accent">Risk Engine</span>
+        </div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Symbol</th>
+                <th>Side</th>
+                <th>Notional</th>
+                <th>Venue</th>
+                <th>Influence</th>
+                <th>Result</th>
+                <th>Reason</th>
+              </tr>
+            </thead>
+            <tbody id="exposure-table-body"></tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+
+    <section class="grid reveal stagger-5">
+      <article class="panel">
+        <div class="panel-head">
+          <h2>Mission Board</h2>
+          <span class="pill pill-accent">Execution Planning</span>
+        </div>
+        <form id="mission-form" class="mission-form">
+          <input id="mission-title" required minlength="3" placeholder="Mission title (e.g. Tighten ETH slippage budget)">
+          <input id="mission-symbol" placeholder="Symbol (optional)">
+          <select id="mission-priority">
+            <option value="low">Low</option>
+            <option value="medium" selected>Medium</option>
+            <option value="high">High</option>
+          </select>
+          <textarea id="mission-objective" placeholder="Objective and decision criteria"></textarea>
+          <button class="btn btn-primary" type="submit">Add Mission</button>
+        </form>
+        <div id="mission-list" class="mission-list"></div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-head">
+          <h2>Scratchpad Trace</h2>
+          <span class="pill pill-accent">Audit Stream</span>
+        </div>
+        <div id="scratchpad-list" class="trace-list"></div>
+      </article>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>

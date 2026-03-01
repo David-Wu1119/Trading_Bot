@@ -141,10 +141,8 @@ class MovingAverageMomentumAlpha:
 
         signal = self.update_price(symbol, price_value, timestamp_str)
         if signal is None:
-            # Provide a small positive placeholder edge so legacy tests can
-            # exercise downstream components even before the lookback window
-            # is populated.
-            return 0.5, self.min_confidence
+            # Do not emit synthetic alpha before warmup is complete.
+            return 0.0, 0.0
         return signal.edge_bps, signal.confidence
 
     def _generate_signal(self, symbol: str, timestamp: str) -> Optional[AlphaSignal]:

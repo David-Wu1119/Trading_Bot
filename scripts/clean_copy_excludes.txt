@@ -1,0 +1,65 @@
+# VCS and local tool state
+.git/
+.gitignore
+.idea/
+.claude/
+.gemini/
+.specify/
+.runtime/
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Local secrets and credentials
+.env
+.env.*
+*.pem
+*.key
+*api*.json
+*API*.txt
+
+# Build/runtime artifacts
+artifacts/
+logs/
+worm/
+build/
+dist/
+tmp/
+test_results/
+reports/tests/bridge/
+reports/tests/e2e/
+
+# Data and generated heavy outputs
+data/frontend/
+*.html
+*.png
+*.jpg
+*.jpeg
+*.gif
+
+# Backup/temp files
+*.bak
+*.orig
+*.tmp
+*.swp
+*.log
+
+# Known unreadable paths in current workspace
+docs/api/
+docs/database/
+infra/terraform/modules/
+src/trading_bot/data/adapters/
+tests/trading_bot/risk/
+
+# One-off summaries/handoff docs not needed in clean copy
+*_SUMMARY*.md
+SESSION_*.md
+START_HERE*.md
+FINAL_*.md
+STATUS_*.md
