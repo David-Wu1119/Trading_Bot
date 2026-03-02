@@ -195,10 +195,10 @@ make production-gate
 ./scripts/ci_production_gate.sh
 ```
 
-This gate currently covers the live advisory path only:
-- control/frontend endpoint behavior (`/api/system/status`, `/api/telemetry/stocks/day`)
-- acceptance/preflight/go-no-go contract checks
-- control API endpoint unit coverage
+This gate currently covers the release-critical control path only:
+- preflight/go-no-go validation tests
+- smoke-level HTTP contract checks for dashboard API endpoints
+- script CLI contract checks for preflight and go/no-go tools
 
 This gate intentionally does **not** claim full-repo health for legacy, optional, or quarantined modules.
 

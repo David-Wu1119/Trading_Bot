@@ -1,0 +1,57 @@
+name: Production Release Gate
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/production-release-gate.yml"
+      - "scripts/ci_production_gate.sh"
+      - "scripts/preflight_release_check.py"
+      - "scripts/go_nogo_check.py"
+      - "api/promql_proxy.py"
+      - "tests/test_preflight_release_check.py"
+      - "tests/test_go_nogo_check.py"
+      - "tests/smoke/test_live_path_http_contract.py"
+      - "requirements.txt"
+      - "requirements-dev.txt"
+  pull_request:
+    paths:
+      - ".github/workflows/production-release-gate.yml"
+      - "scripts/ci_production_gate.sh"
+      - "scripts/preflight_release_check.py"
+      - "scripts/go_nogo_check.py"
+      - "api/promql_proxy.py"
+      - "tests/test_preflight_release_check.py"
+      - "tests/test_go_nogo_check.py"
+      - "tests/smoke/test_live_path_http_contract.py"
+      - "requirements.txt"
+      - "requirements-dev.txt"
+
+jobs:
+  focused_production_gate:
+    name: Focused Production Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install gate dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run focused production gate
+        run: ./scripts/ci_production_gate.sh
