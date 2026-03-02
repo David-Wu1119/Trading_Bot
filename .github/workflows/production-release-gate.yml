@@ -1,0 +1,60 @@
+name: Production Release Gate
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/production-release-gate.yml"
+      - "scripts/ci_production_gate.sh"
+      - "scripts/preflight_release_check.py"
+      - "scripts/go_nogo_check.py"
+      - "api/promql_proxy.py"
+      - "tests/test_preflight_release_check.py"
+      - "tests/test_go_nogo_check.py"
+      - "tests/smoke/test_live_path_http_contract.py"
+      - "requirements.txt"
+      - "requirements-dev.txt"
+  pull_request:
+    paths:
+      - ".github/workflows/production-release-gate.yml"
+      - "scripts/ci_production_gate.sh"
+      - "scripts/preflight_release_check.py"
+      - "scripts/go_nogo_check.py"
+      - "api/promql_proxy.py"
+      - "tests/test_preflight_release_check.py"
+      - "tests/test_go_nogo_check.py"
+      - "tests/smoke/test_live_path_http_contract.py"
+      - "requirements.txt"
+      - "requirements-dev.txt"
+
+jobs:
+  focused_production_gate:
+    name: Focused Production Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install gate dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            pytest==8.4.1 \
+            pytest-asyncio==1.2.0 \
+            requests==2.32.4 \
+            fastapi==0.116.0 \
+            httpx==0.28.1 \
+            redis==6.2.0
+
+      - name: Run focused production gate
+        run: ./scripts/ci_production_gate.sh

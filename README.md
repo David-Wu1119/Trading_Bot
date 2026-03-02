@@ -186,6 +186,22 @@ make test-performance          # Latency benchmarks
 make test-load                # Throughput testing
 ```
 
+### **Production Release Gate (Authoritative)**
+For release confidence, use the focused production gate instead of the full legacy suite:
+
+```bash
+make production-gate
+# or
+./scripts/ci_production_gate.sh
+```
+
+This gate currently covers the release-critical control path only:
+- preflight/go-no-go validation tests
+- smoke-level HTTP contract checks for dashboard API endpoints
+- script CLI contract checks for preflight and go/no-go tools
+
+This gate intentionally does **not** claim full-repo health for legacy, optional, or quarantined modules.
+
 ### **Model Training & Optimization**
 ```bash
 # Train enhanced LSTM/Transformer
