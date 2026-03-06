@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -17,6 +19,7 @@ DEFAULT_MIN_CRYPTO_FILLS_FOR_ETH_ON = 3
 DEFAULT_MIN_TOTAL_FILLS = 3
 DEFAULT_MIN_STOCK_FILLS = 0
 DEFAULT_MIN_MARKET_HOURS_CHECKPOINTS = 0
+MARKET_TZ = ZoneInfo("America/New_York")
 
 
 def _utc_now() -> datetime:
@@ -25,6 +28,10 @@ def _utc_now() -> datetime:
 
 def _timestamp_slug() -> str:
     return _utc_now().strftime("%Y%m%dT%H%M%SZ")
+
+
+def _market_date_slug(ts: datetime) -> str:
+    return ts.astimezone(MARKET_TZ).date().isoformat()
 
 
 def _load_env_lines(path: Path) -> list[str]:
@@ -109,6 +116,41 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(float(value))
     except (TypeError, ValueError):
         return default
+
+
+def _update_latest_summary_links(
+    *,
+    capture_dir: Path,
+    summary_artifact: Path,
+) -> dict[str, str]:
+    """
+    Maintain stable latest-summary references for shell consumers.
+
+    Produces:
+      - close_summary_latest.json (symlink when supported, otherwise copied file)
+      - close_summary_latest_path.txt (absolute path pointer)
+    """
+    latest_json = capture_dir / "close_summary_latest.json"
+    latest_path_txt = capture_dir / "close_summary_latest_path.txt"
+    mode = "symlink"
+
+    latest_path_txt.write_text(str(summary_artifact) + "\n", encoding="utf-8")
+
+    if latest_json.exists() or latest_json.is_symlink():
+        latest_json.unlink()
+
+    try:
+        latest_json.symlink_to(summary_artifact.name)
+    except OSError:
+        # Some filesystems or environments disallow symlinks; copy as deterministic fallback.
+        shutil.copyfile(summary_artifact, latest_json)
+        mode = "copied_file"
+
+    return {
+        "summary_latest_json": str(latest_json),
+        "summary_latest_path_pointer": str(latest_path_txt),
+        "summary_latest_mode": mode,
+    }
 
 
 def _extract_position_details(
@@ -341,7 +383,7 @@ def _capture_arm(
     min_market_hours_checkpoints: int,
 ) -> dict[str, Any]:
     now = _utc_now()
-    date_slug = now.date().isoformat()
+    date_slug = _market_date_slug(now)
     capture_dir = artifact_root / date_slug / arm
     capture_dir.mkdir(parents=True, exist_ok=True)
 
@@ -521,11 +563,16 @@ def _capture_arm(
         json.dumps(summary_payload, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+    latest_refs = _update_latest_summary_links(
+        capture_dir=capture_dir,
+        summary_artifact=summary_artifact,
+    )
 
     return {
         "arm": arm,
         "artifact": str(artifact),
         "summary_artifact": str(summary_artifact),
+        **latest_refs,
         "date": date_slug,
         "timestamp": now.isoformat(),
     }
