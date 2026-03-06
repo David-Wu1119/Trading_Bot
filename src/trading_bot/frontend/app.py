@@ -9,7 +9,7 @@ import os
 import re
 import smtplib
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any, Literal
@@ -26,11 +26,49 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _clean_env_text(value: str | None) -> str:
+    if not value:
+        return ""
+    return value.strip().strip('"').strip("'")
+
+
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _parse_iso_datetime(raw: Any) -> datetime | None:
+    if isinstance(raw, datetime):
+        parsed = raw
+    elif isinstance(raw, str):
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _is_crypto_like_symbol(symbol: str) -> bool:
+    upper = symbol.upper().strip()
+    return (
+        upper.endswith("-USD")
+        or upper.endswith("-USDT")
+        or upper.endswith("-USDC")
+        or upper.endswith("/USD")
+        or upper.endswith("/USDT")
+        or upper.endswith("/USDC")
+    )
+
+
+def _bucket_for_symbol(symbol: str) -> str:
+    return "crypto" if _is_crypto_like_symbol(symbol) else "stocks"
 
 
 def _safe_mtime(path: Path) -> float:
@@ -152,7 +190,9 @@ def _default_config() -> DashboardConfig:
     )
     advisor_notify_confidence_threshold = min(max(advisor_notify_confidence_threshold, 0.1), 0.99)
 
-    advisor_wechat_webhook_url = os.getenv("TRADING_ADVISOR_NOTIFY_WECHAT_WEBHOOK", "").strip() or None
+    wechat_primary = _clean_env_text(os.getenv("TRADING_ADVISOR_NOTIFY_WECHAT_WEBHOOK", ""))
+    wechat_fallback = _clean_env_text(os.getenv("WECHAT_WORK_WEBHOOK_URL", ""))
+    advisor_wechat_webhook_url = wechat_primary or wechat_fallback or None
     advisor_email_to = os.getenv("TRADING_ADVISOR_NOTIFY_EMAIL_TO", "").strip() or None
     advisor_email_from = os.getenv("TRADING_ADVISOR_NOTIFY_EMAIL_FROM", "").strip() or None
     advisor_smtp_host = os.getenv("TRADING_ADVISOR_NOTIFY_SMTP_HOST", "").strip() or None
@@ -883,6 +923,279 @@ class TelemetryService:
 
         return trends
 
+    @staticmethod
+    def _empty_scorecard() -> dict[str, Any]:
+        return {
+            "realized_pnl_usd": 0.0,
+            "unrealized_pnl_usd": 0.0,
+            "fees_usd": 0.0,
+            "fills": 0,
+            "trade_count": 0,
+            "open_positions": 0,
+        }
+
+    def _fallback_scorecards(
+        self,
+        *,
+        live_pnl: dict[str, Any] | None,
+        trades: list[dict[str, Any]],
+        prices: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        cards = {
+            "stocks": self._empty_scorecard(),
+            "crypto": self._empty_scorecard(),
+            "portfolio_total": self._empty_scorecard(),
+        }
+
+        # Populate portfolio totals from live snapshot when available.
+        if isinstance(live_pnl, dict):
+            cards["portfolio_total"]["realized_pnl_usd"] = _safe_float(live_pnl.get("realized_pnl_usd"))
+            cards["portfolio_total"]["unrealized_pnl_usd"] = _safe_float(live_pnl.get("unrealized_pnl_usd"))
+            cards["portfolio_total"]["fees_usd"] = _safe_float(live_pnl.get("total_fees_usd"))
+            cards["portfolio_total"]["open_positions"] = int(_safe_float(live_pnl.get("positions_count"), 0.0))
+
+        # Fills/trade counts inferred from telemetry trades.
+        for trade in trades:
+            if not isinstance(trade, dict):
+                continue
+            symbol = str(trade.get("symbol") or "")
+            bucket = _bucket_for_symbol(symbol)
+            status = str(trade.get("status") or "").upper()
+            cards["portfolio_total"]["trade_count"] += 1
+            cards[bucket]["trade_count"] += 1
+            if status == "EXECUTED":
+                cards["portfolio_total"]["fills"] += 1
+                cards[bucket]["fills"] += 1
+
+        if cards["portfolio_total"]["open_positions"] <= 0:
+            cards["portfolio_total"]["unrealized_pnl_usd"] = 0.0
+
+        # If totals are known but split is unknown, allocate by observed symbols.
+        stock_symbols = [row for row in prices if not _is_crypto_like_symbol(str(row.get("symbol") or ""))]
+        crypto_symbols = [row for row in prices if _is_crypto_like_symbol(str(row.get("symbol") or ""))]
+        if stock_symbols and not crypto_symbols:
+            cards["stocks"]["realized_pnl_usd"] = cards["portfolio_total"]["realized_pnl_usd"]
+            cards["stocks"]["unrealized_pnl_usd"] = cards["portfolio_total"]["unrealized_pnl_usd"]
+            cards["stocks"]["fees_usd"] = cards["portfolio_total"]["fees_usd"]
+        elif crypto_symbols and not stock_symbols:
+            cards["crypto"]["realized_pnl_usd"] = cards["portfolio_total"]["realized_pnl_usd"]
+            cards["crypto"]["unrealized_pnl_usd"] = cards["portfolio_total"]["unrealized_pnl_usd"]
+            cards["crypto"]["fees_usd"] = cards["portfolio_total"]["fees_usd"]
+
+        return cards
+
+    def _fallback_stock_day_report(self) -> dict[str, Any]:
+        summary = {
+            "entry_signals": 0,
+            "blocked_signals": 0,
+            "fills": 0,
+            "realized_pnl_usd": 0.0,
+            "unrealized_pnl_usd": 0.0,
+            "fees_usd": 0.0,
+            "freshness_fail_count": 0,
+            "market_hours_fill_count": 0,
+            "after_hours_ignored_stale_count": 0,
+            "block_reasons": {},
+        }
+        return {
+            "date_et": datetime.now().astimezone().date().isoformat(),
+            "summary": summary,
+            "symbols": {},
+            "source": "frontend_fallback",
+        }
+
+    def _stock_day_report_from_control(self, control_market_state: dict[str, Any] | None) -> dict[str, Any]:
+        if isinstance(control_market_state, dict):
+            stock_day_report = control_market_state.get("stock_day_report")
+            if isinstance(stock_day_report, dict):
+                payload = dict(stock_day_report)
+                summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+                payload["summary"] = {
+                    "entry_signals": int(_safe_float(summary.get("entry_signals"), 0.0)),
+                    "blocked_signals": int(_safe_float(summary.get("blocked_signals"), 0.0)),
+                    "fills": int(_safe_float(summary.get("fills"), 0.0)),
+                    "realized_pnl_usd": _safe_float(summary.get("realized_pnl_usd")),
+                    "unrealized_pnl_usd": _safe_float(summary.get("unrealized_pnl_usd")),
+                    "fees_usd": _safe_float(summary.get("fees_usd")),
+                    "freshness_fail_count": int(_safe_float(summary.get("freshness_fail_count"), 0.0)),
+                    "market_hours_fill_count": int(_safe_float(summary.get("market_hours_fill_count"), 0.0)),
+                    "after_hours_ignored_stale_count": int(
+                        _safe_float(summary.get("after_hours_ignored_stale_count"), 0.0)
+                    ),
+                    "block_reasons": (
+                        summary.get("block_reasons") if isinstance(summary.get("block_reasons"), dict) else {}
+                    ),
+                }
+                if "symbols" not in payload or not isinstance(payload.get("symbols"), dict):
+                    payload["symbols"] = {}
+                payload["source"] = "control_api_stock_day_report"
+                return payload
+        return self._fallback_stock_day_report()
+
+    def _advisor_actionable_signals(
+        self,
+        now: datetime,
+        *,
+        lookback_seconds: int = 24 * 3600,
+        max_entries: int = 600,
+    ) -> list[dict[str, Any]]:
+        history = self.advisor_history(limit=max_entries)
+        entries = history.get("entries") if isinstance(history.get("entries"), list) else []
+        cutoff = now - timedelta(seconds=max(lookback_seconds, 300))
+
+        actionable: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        actionable_types = {"BUY_BIAS", "REDUCE", "AVOID"}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            signal_time = _parse_iso_datetime(entry.get("timestamp"))
+            if signal_time is None or signal_time < cutoff or signal_time > now:
+                continue
+            recommendations = entry.get("top_recommendations")
+            if not isinstance(recommendations, list):
+                continue
+            for row in recommendations:
+                if not isinstance(row, dict):
+                    continue
+                symbol = str(row.get("symbol") or "").strip().upper()
+                recommendation = str(row.get("recommendation") or "").strip().upper()
+                if not symbol or recommendation not in actionable_types:
+                    continue
+                dedupe_key = (signal_time.isoformat(), symbol, recommendation)
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                actionable.append(
+                    {
+                        "timestamp": signal_time.isoformat(),
+                        "symbol": symbol,
+                        "recommendation": recommendation,
+                    }
+                )
+
+        actionable.sort(key=lambda item: item["timestamp"])
+        return actionable
+
+    def _advisor_execution_alignment(
+        self,
+        now: datetime,
+        trades: list[dict[str, Any]],
+        *,
+        lookback_seconds: int = 24 * 3600,
+        match_window_seconds: int = 4 * 3600,
+    ) -> dict[str, Any]:
+        signals = self._advisor_actionable_signals(
+            now,
+            lookback_seconds=lookback_seconds,
+        )
+
+        cutoff = now - timedelta(seconds=max(lookback_seconds, 300))
+        executed: list[dict[str, Any]] = []
+        for trade in trades:
+            if not isinstance(trade, dict):
+                continue
+            if str(trade.get("status") or "").upper() != "EXECUTED":
+                continue
+            symbol = str(trade.get("symbol") or "").strip().upper()
+            if not symbol:
+                continue
+            trade_time = _parse_iso_datetime(trade.get("timestamp"))
+            if trade_time is None or trade_time < cutoff or trade_time > now:
+                continue
+            executed.append(
+                {
+                    "symbol": symbol,
+                    "timestamp": trade_time.isoformat(),
+                }
+            )
+
+        signals_sorted = sorted(signals, key=lambda item: item["timestamp"])
+        executed_sorted = sorted(executed, key=lambda item: item["timestamp"])
+
+        used_trade_indexes: set[int] = set()
+        signal_matches = 0
+        lag_seconds: list[float] = []
+        unmatched_signals: list[dict[str, Any]] = []
+
+        for signal in signals_sorted:
+            signal_symbol = str(signal["symbol"]).upper()
+            signal_time = _parse_iso_datetime(signal["timestamp"])
+            if signal_time is None:
+                continue
+
+            matched = False
+            for idx, trade in enumerate(executed_sorted):
+                if idx in used_trade_indexes:
+                    continue
+                if str(trade["symbol"]).upper() != signal_symbol:
+                    continue
+                trade_time = _parse_iso_datetime(trade["timestamp"])
+                if trade_time is None:
+                    continue
+                delta = (trade_time - signal_time).total_seconds()
+                if 0.0 <= delta <= float(match_window_seconds):
+                    used_trade_indexes.add(idx)
+                    signal_matches += 1
+                    lag_seconds.append(delta)
+                    matched = True
+                    break
+
+            if not matched:
+                unmatched_signals.append(
+                    {
+                        "timestamp": signal["timestamp"],
+                        "symbol": signal_symbol,
+                        "recommendation": signal["recommendation"],
+                    }
+                )
+
+        unmatched_exec_count = 0
+        for trade in executed_sorted:
+            trade_symbol = str(trade["symbol"]).upper()
+            trade_time = _parse_iso_datetime(trade["timestamp"])
+            if trade_time is None:
+                continue
+            has_signal = False
+            for signal in signals_sorted:
+                if str(signal["symbol"]).upper() != trade_symbol:
+                    continue
+                signal_time = _parse_iso_datetime(signal["timestamp"])
+                if signal_time is None:
+                    continue
+                delta = (trade_time - signal_time).total_seconds()
+                if 0.0 <= delta <= float(match_window_seconds):
+                    has_signal = True
+                    break
+            if not has_signal:
+                unmatched_exec_count += 1
+
+        median_lag_seconds: float | None = None
+        if lag_seconds:
+            sorted_lags = sorted(lag_seconds)
+            mid = len(sorted_lags) // 2
+            if len(sorted_lags) % 2 == 0:
+                median_lag_seconds = (sorted_lags[mid - 1] + sorted_lags[mid]) / 2.0
+            else:
+                median_lag_seconds = sorted_lags[mid]
+
+        signal_count = len(signals_sorted)
+        executed_count = len(executed_sorted)
+        utilization_rate = (signal_matches / signal_count) if signal_count > 0 else None
+
+        return {
+            "advisor_signal_count": signal_count,
+            "advisor_signal_symbols": sorted({str(item["symbol"]).upper() for item in signals_sorted}),
+            "executed_trade_count": executed_count,
+            "executed_trade_symbols": sorted({str(item["symbol"]).upper() for item in executed_sorted}),
+            "signal_execution_match_count": signal_matches,
+            "signal_execution_utilization_rate": utilization_rate,
+            "median_execution_lag_seconds": median_lag_seconds,
+            "unmatched_advisor_signals": unmatched_signals[:25],
+            "unmatched_advisor_signal_count": len(unmatched_signals),
+            "executed_without_advisor_signal_count": unmatched_exec_count,
+        }
+
     def economics_summary(self) -> dict[str, Any] | None:
         latest = self._latest_json(self.config.econ_dir, ["*/econ_close.json", "**/econ_close.json"])
         if latest is None:
@@ -988,6 +1301,14 @@ class TelemetryService:
                 }
                 break
 
+        if isinstance(live_pnl, dict):
+            positions_count = int(_safe_float(live_pnl.get("positions_count"), 0.0))
+            live_pnl["positions_count"] = positions_count
+            if positions_count <= 0:
+                live_pnl["unrealized_pnl_usd"] = 0.0
+                realized = _safe_float(live_pnl.get("realized_pnl_usd"))
+                live_pnl["portfolio_pnl_usd"] = realized
+
         prices_by_symbol: dict[str, dict[str, Any]] = {}
         if control_market_state:
             price_rows = control_market_state.get("prices")
@@ -1038,6 +1359,7 @@ class TelemetryService:
 
         price_trends = self._compute_price_trends(price_samples)
 
+        trade_scan_limit = max(trade_limit, 200)
         trades: list[dict[str, Any]] = []
         for line in reversed(lines):
             payload = self._extract_structured_event(line)
@@ -1101,10 +1423,10 @@ class TelemetryService:
                                 "source": "risk",
                             }
                         )
-                        if len(trades) >= trade_limit:
+                        if len(trades) >= trade_scan_limit:
                             break
 
-            if len(trades) >= trade_limit:
+            if len(trades) >= trade_scan_limit:
                 break
 
         if not trades:
@@ -1140,6 +1462,79 @@ class TelemetryService:
                 )
 
         prices = sorted(prices_by_symbol.values(), key=lambda item: item["symbol"])
+        open_positions: list[dict[str, Any]] = []
+        open_positions_count = 0
+        if control_market_state and isinstance(control_market_state.get("open_positions"), list):
+            for row in control_market_state.get("open_positions", []):
+                if not isinstance(row, dict):
+                    continue
+                symbol = str(row.get("symbol") or "").strip()
+                if not symbol:
+                    continue
+                qty = _safe_float(row.get("quantity"), 0.0)
+                if abs(qty) <= 1e-12:
+                    continue
+                open_positions.append(
+                    {
+                        "symbol": symbol,
+                        "quantity": qty,
+                        "asset_class": str(row.get("asset_class") or "").strip() or None,
+                        "mark_price": (
+                            _safe_float(row.get("mark_price"))
+                            if _safe_float(row.get("mark_price")) > 0.0
+                            else None
+                        ),
+                        "entry_price": (
+                            _safe_float(row.get("entry_price"))
+                            if _safe_float(row.get("entry_price")) > 0.0
+                            else None
+                        ),
+                        "entry_time": row.get("entry_time"),
+                        "unrealized_pnl_usd": _safe_float(row.get("unrealized_pnl_usd")),
+                        "timestamp": row.get("timestamp"),
+                        "source": "control_api_market_state",
+                    }
+                )
+            open_positions_count = len(open_positions)
+        scorecards: dict[str, Any] | None = None
+        if control_market_state and isinstance(control_market_state.get("scorecards"), dict):
+            raw_scorecards = control_market_state.get("scorecards")
+            if isinstance(raw_scorecards, dict):
+                scorecards = {}
+                for key in ("stocks", "crypto", "portfolio_total"):
+                    row = raw_scorecards.get(key) if isinstance(raw_scorecards.get(key), dict) else {}
+                    scorecard_open_positions = int(_safe_float(row.get("open_positions"), 0.0))
+                    unrealized_pnl = _safe_float(row.get("unrealized_pnl_usd"))
+                    if scorecard_open_positions <= 0:
+                        unrealized_pnl = 0.0
+                    scorecards[key] = {
+                        "realized_pnl_usd": _safe_float(row.get("realized_pnl_usd")),
+                        "unrealized_pnl_usd": unrealized_pnl,
+                        "fees_usd": _safe_float(row.get("fees_usd")),
+                        "fills": int(_safe_float(row.get("fills"), 0.0)),
+                        "trade_count": int(_safe_float(row.get("trade_count"), 0.0)),
+                        "open_positions": scorecard_open_positions,
+                    }
+
+        if scorecards is None:
+            scorecards = self._fallback_scorecards(
+                live_pnl=live_pnl,
+                trades=trades[:trade_limit],
+                prices=prices,
+            )
+
+        stock_day_report = self._stock_day_report_from_control(control_market_state)
+        equity_session_policy = (
+            control_market_state.get("equity_session_policy")
+            if control_market_state and isinstance(control_market_state.get("equity_session_policy"), dict)
+            else None
+        )
+        crypto_risk_controls = (
+            control_market_state.get("crypto_risk_controls")
+            if control_market_state and isinstance(control_market_state.get("crypto_risk_controls"), dict)
+            else None
+        )
+        advisor_execution_alignment = self._advisor_execution_alignment(now, trades)
         return {
             "timestamp": _utc_now_iso(),
             "prices": prices,
@@ -1148,6 +1543,13 @@ class TelemetryService:
             "trades": trades[:trade_limit],
             "trade_count": len(trades[:trade_limit]),
             "live_pnl": live_pnl,
+            "open_positions_count": open_positions_count,
+            "open_positions": open_positions,
+            "scorecards": scorecards,
+            "stock_day_report": stock_day_report,
+            "advisor_execution_alignment": advisor_execution_alignment,
+            "equity_session_policy": equity_session_policy,
+            "crypto_risk_controls": crypto_risk_controls,
             "all_symbols_fresh": bool(control_market_state.get("all_symbols_fresh", False))
             if control_market_state
             else None,
@@ -1165,6 +1567,15 @@ class TelemetryService:
             "control_market_state_error": control_market_error,
             "source_log": str(self.config.orchestrator_log_path),
         }
+
+    async def stocks_day_summary(self) -> dict[str, Any]:
+        market = await self.market_summary(trade_limit=120, symbol_limit=32)
+        report = market.get("stock_day_report")
+        if isinstance(report, dict):
+            payload = dict(report)
+            payload.setdefault("source", "control_api_stock_day_report")
+            return payload
+        return self._fallback_stock_day_report()
 
     @staticmethod
     def _portfolio_posture_from_score(score: int) -> tuple[str, str]:
@@ -1201,7 +1612,28 @@ class TelemetryService:
         )
 
         stale_symbols = market_payload.get("stale_symbols", [])
-        stale_count = len(stale_symbols) if isinstance(stale_symbols, list) else 0
+        stale_list = stale_symbols if isinstance(stale_symbols, list) else []
+        equity_policy = (
+            market_payload.get("equity_session_policy")
+            if isinstance(market_payload.get("equity_session_policy"), dict)
+            else {}
+        )
+        market_hours = (
+            bool(equity_policy.get("market_hours"))
+            if isinstance(equity_policy, dict) and "market_hours" in equity_policy
+            else True
+        )
+        if market_hours:
+            effective_stale_symbols = stale_list
+            ignored_after_hours_equities: list[str] = []
+        else:
+            effective_stale_symbols = [
+                symbol for symbol in stale_list if _is_crypto_like_symbol(str(symbol))
+            ]
+            ignored_after_hours_equities = [
+                str(symbol) for symbol in stale_list if not _is_crypto_like_symbol(str(symbol))
+            ]
+        stale_count = len(effective_stale_symbols)
         stale_pass = stale_count == 0
         gates.append(
             {
@@ -1210,11 +1642,16 @@ class TelemetryService:
                 "threshold": "== 0 stale symbols",
                 "passed": stale_pass,
                 "critical": True,
-                "details": stale_symbols[:5] if isinstance(stale_symbols, list) else [],
+                "details": {
+                    "effective_stale_symbols": effective_stale_symbols[:5],
+                    "ignored_after_hours_equities": ignored_after_hours_equities[:5],
+                    "market_hours": market_hours,
+                },
             }
         )
 
-        ramp_pass = "NO" not in ramp_decision
+        normalized_ramp = ramp_decision.strip().upper()
+        ramp_pass = not normalized_ramp.startswith("NO_")
         gates.append(
             {
                 "name": "ramp_decision",
@@ -1222,6 +1659,10 @@ class TelemetryService:
                 "threshold": "must not be NO_*",
                 "passed": ramp_pass,
                 "critical": True,
+                "details": {
+                    "normalized": normalized_ramp,
+                    "unknown": normalized_ramp in {"", "UNKNOWN"},
+                },
             }
         )
 
@@ -1384,6 +1825,14 @@ class TelemetryService:
             posture_reasons.append(f"Stale market data symbols: {', '.join(stale_symbols[:5])}.")
 
         live_pnl = market_payload.get("live_pnl")
+        execution_alignment = (
+            market_payload.get("advisor_execution_alignment")
+            if isinstance(market_payload.get("advisor_execution_alignment"), dict)
+            else self._advisor_execution_alignment(
+                datetime.now(timezone.utc),
+                market_payload.get("trades", []) if isinstance(market_payload.get("trades"), list) else [],
+            )
+        )
         if isinstance(live_pnl, dict):
             portfolio_value = _safe_float(live_pnl.get("portfolio_value_usd"))
             portfolio_pnl = _safe_float(live_pnl.get("portfolio_pnl_usd"))
@@ -1654,6 +2103,16 @@ class TelemetryService:
                 if isinstance(economics_payload, dict)
                 else None
             ),
+            "advisor_signal_count": int(_safe_float(execution_alignment.get("advisor_signal_count"), 0.0)),
+            "executed_trade_count": int(_safe_float(execution_alignment.get("executed_trade_count"), 0.0)),
+            "signal_execution_match_count": int(
+                _safe_float(execution_alignment.get("signal_execution_match_count"), 0.0)
+            ),
+            "signal_execution_utilization_rate": (
+                _safe_float(execution_alignment.get("signal_execution_utilization_rate"))
+                if execution_alignment.get("signal_execution_utilization_rate") is not None
+                else None
+            ),
         }
 
         response_payload = {
@@ -1664,6 +2123,7 @@ class TelemetryService:
             "posture_reasons": posture_reasons or ["No critical guardrail signals."],
             "key_metrics": key_metrics,
             "acceptance_gates": acceptance_gates,
+            "execution_alignment": execution_alignment,
             "decision_locked": decision_locked,
             "locked_recommendation_count": locked_recommendation_count,
             "recommendations": recommendations[:safe_symbol_limit],
@@ -1914,6 +2374,10 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
             trade_limit=safe_trade_limit,
             symbol_limit=safe_symbol_limit,
         )
+
+    @app.get("/api/telemetry/stocks/day")
+    async def telemetry_stocks_day() -> dict[str, Any]:
+        return await telemetry.stocks_day_summary()
 
     @app.get("/api/telemetry/advisor")
     async def telemetry_advisor(symbol_limit: int = 10) -> dict[str, Any]:
