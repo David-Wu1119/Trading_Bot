@@ -100,7 +100,9 @@ def _fetch_json(url: str) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"invalid JSON from {url}: {data[:200]}") from exc
     if not isinstance(payload, dict):
-        raise RuntimeError(f"unexpected payload type from {url}: {type(payload).__name__}")
+        raise RuntimeError(
+            f"unexpected payload type from {url}: {type(payload).__name__}"
+        )
     return payload
 
 
@@ -116,6 +118,16 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(float(value))
     except (TypeError, ValueError):
         return default
+
+
+def _read_json_dict(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
 
 
 def _update_latest_summary_links(
@@ -181,13 +193,160 @@ def _extract_position_details(
     return []
 
 
+def _load_previous_arm_summary(
+    *,
+    artifact_root: Path,
+    arm: str,
+    current_date_slug: str,
+) -> tuple[dict[str, Any] | None, Path | None]:
+    if not artifact_root.exists():
+        return None, None
+
+    date_dirs = sorted(
+        (
+            path
+            for path in artifact_root.iterdir()
+            if path.is_dir() and path.name < current_date_slug
+        ),
+        key=lambda path: path.name,
+        reverse=True,
+    )
+
+    for date_dir in date_dirs:
+        arm_dir = date_dir / arm
+        if not arm_dir.exists():
+            continue
+
+        candidates = [arm_dir / "close_summary_latest.json"]
+        candidates.extend(sorted(arm_dir.glob("close_summary_*.json"), reverse=True))
+
+        for candidate in candidates:
+            if not candidate.exists():
+                continue
+            payload = _read_json_dict(candidate)
+            if payload is not None:
+                return payload, candidate.resolve()
+
+    return None, None
+
+
+def _build_delta_metric(
+    *,
+    current_value: float,
+    baseline_value: float,
+    allow_negative: bool,
+) -> tuple[float, bool]:
+    delta = current_value - baseline_value
+    if not allow_negative and delta < 0:
+        return current_value, True
+    return delta, False
+
+
+def _build_session_delta_scorecard(
+    *,
+    current_scorecard: dict[str, Any],
+    previous_scorecard: dict[str, Any] | None,
+    realized_override: float | None = None,
+    fees_override: float | None = None,
+    fills_override: int | None = None,
+) -> dict[str, Any]:
+    baseline = previous_scorecard if isinstance(previous_scorecard, dict) else {}
+
+    realized_delta, realized_reset = _build_delta_metric(
+        current_value=_safe_float(current_scorecard.get("realized_pnl_usd")),
+        baseline_value=_safe_float(baseline.get("realized_pnl_usd")),
+        allow_negative=True,
+    )
+    fees_delta, fees_reset = _build_delta_metric(
+        current_value=_safe_float(current_scorecard.get("fees_usd")),
+        baseline_value=_safe_float(baseline.get("fees_usd")),
+        allow_negative=False,
+    )
+    fills_delta_float, fills_reset = _build_delta_metric(
+        current_value=float(_safe_int(current_scorecard.get("fills"))),
+        baseline_value=float(_safe_int(baseline.get("fills"))),
+        allow_negative=False,
+    )
+    trades_delta_float, trades_reset = _build_delta_metric(
+        current_value=float(_safe_int(current_scorecard.get("trade_count"))),
+        baseline_value=float(_safe_int(baseline.get("trade_count"))),
+        allow_negative=False,
+    )
+
+    fills_delta = int(round(fills_delta_float))
+    trades_delta = int(round(trades_delta_float))
+    reset_fields: list[str] = []
+    if realized_reset:
+        reset_fields.append("realized_pnl_usd")
+    if fees_reset:
+        reset_fields.append("fees_usd")
+    if fills_reset:
+        reset_fields.append("fills")
+    if trades_reset:
+        reset_fields.append("trade_count")
+
+    return {
+        "realized_pnl_usd": (
+            realized_override if realized_override is not None else realized_delta
+        ),
+        "unrealized_pnl_usd": _safe_float(current_scorecard.get("unrealized_pnl_usd")),
+        "fees_usd": fees_override if fees_override is not None else fees_delta,
+        "fills": fills_override if fills_override is not None else fills_delta,
+        "trade_count": trades_delta,
+        "open_positions": _safe_int(current_scorecard.get("open_positions")),
+        "baseline_available": previous_scorecard is not None,
+        "baseline_reset_fields": reset_fields,
+    }
+
+
+def _combine_session_scorecards(
+    *,
+    stocks_session: dict[str, Any],
+    crypto_session: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "realized_pnl_usd": _safe_float(stocks_session.get("realized_pnl_usd"))
+        + _safe_float(crypto_session.get("realized_pnl_usd")),
+        "unrealized_pnl_usd": _safe_float(stocks_session.get("unrealized_pnl_usd"))
+        + _safe_float(crypto_session.get("unrealized_pnl_usd")),
+        "fees_usd": _safe_float(stocks_session.get("fees_usd"))
+        + _safe_float(crypto_session.get("fees_usd")),
+        "fills": _safe_int(stocks_session.get("fills"))
+        + _safe_int(crypto_session.get("fills")),
+        "trade_count": _safe_int(stocks_session.get("trade_count"))
+        + _safe_int(crypto_session.get("trade_count")),
+        "open_positions": _safe_int(stocks_session.get("open_positions"))
+        + _safe_int(crypto_session.get("open_positions")),
+        "baseline_available": bool(stocks_session.get("baseline_available"))
+        or bool(crypto_session.get("baseline_available")),
+        "baseline_reset_fields": list(
+            dict.fromkeys(
+                [
+                    *(
+                        stocks_session.get("baseline_reset_fields")
+                        if isinstance(stocks_session.get("baseline_reset_fields"), list)
+                        else []
+                    ),
+                    *(
+                        crypto_session.get("baseline_reset_fields")
+                        if isinstance(crypto_session.get("baseline_reset_fields"), list)
+                        else []
+                    ),
+                ]
+            )
+        ),
+    }
+
+
 def _build_telemetry_validity(
     *,
     market_payload: dict[str, Any],
     portfolio_scorecard: dict[str, Any],
     position_details: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    live_pnl = market_payload.get("live_pnl") if isinstance(market_payload, dict) else None
+    live_pnl = (
+        market_payload.get("live_pnl") if isinstance(market_payload, dict) else None
+    )
     scorecard_open_positions = _safe_int(portfolio_scorecard.get("open_positions"))
     live_open_positions = _safe_int(
         live_pnl.get("positions_count") if isinstance(live_pnl, dict) else 0
@@ -239,7 +398,9 @@ def _build_ab_validity(
     }
 
 
-def _extract_market_hours_checkpoint_count(rubric_payload: dict[str, Any] | None) -> int | None:
+def _extract_market_hours_checkpoint_count(
+    rubric_payload: dict[str, Any] | None
+) -> int | None:
     if not isinstance(rubric_payload, dict):
         return None
 
@@ -259,16 +420,18 @@ def _extract_market_hours_checkpoint_count(rubric_payload: dict[str, Any] | None
 
 def _build_session_validity(
     *,
-    portfolio_scorecard: dict[str, Any],
-    stock_scorecard: dict[str, Any],
+    portfolio_session_scorecard: dict[str, Any],
+    stock_session_scorecard: dict[str, Any],
     rubric_payload: dict[str, Any] | None,
     min_total_fills: int,
     min_stock_fills: int,
     min_market_hours_checkpoints: int,
 ) -> dict[str, Any]:
-    total_fills = _safe_int(portfolio_scorecard.get("fills"))
-    stock_fills = _safe_int(stock_scorecard.get("fills"))
-    market_hours_checkpoint_count = _extract_market_hours_checkpoint_count(rubric_payload)
+    total_fills = _safe_int(portfolio_session_scorecard.get("fills"))
+    stock_fills = _safe_int(stock_session_scorecard.get("fills"))
+    market_hours_checkpoint_count = _extract_market_hours_checkpoint_count(
+        rubric_payload
+    )
 
     reasons: list[str] = []
     if min_total_fills > 0 and total_fills < min_total_fills:
@@ -308,10 +471,18 @@ def _build_overall_validity(
 
     reasons: list[str] = []
     reasons.extend(
-        [str(reason) for reason in ab_validity.get("reasons", []) if isinstance(reason, str)]
+        [
+            str(reason)
+            for reason in ab_validity.get("reasons", [])
+            if isinstance(reason, str)
+        ]
     )
     reasons.extend(
-        [str(reason) for reason in session_validity.get("reasons", []) if isinstance(reason, str)]
+        [
+            str(reason)
+            for reason in session_validity.get("reasons", [])
+            if isinstance(reason, str)
+        ]
     )
     if not telemetry_valid:
         reasons.append("telemetry_inconsistent")
@@ -416,28 +587,75 @@ def _capture_arm(
     artifact.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
     advisor_gates = advisor.get("acceptance_gates") if isinstance(advisor, dict) else {}
-    advisor_key_metrics = advisor.get("key_metrics") if isinstance(advisor, dict) else {}
+    advisor_key_metrics = (
+        advisor.get("key_metrics") if isinstance(advisor, dict) else {}
+    )
     market_scorecards = market.get("scorecards") if isinstance(market, dict) else {}
-    market_alignment = market.get("advisor_execution_alignment") if isinstance(market, dict) else {}
-    market_stock_day = market.get("stock_day_report") if isinstance(market, dict) else {}
+    market_alignment = (
+        market.get("advisor_execution_alignment") if isinstance(market, dict) else {}
+    )
+    market_stock_day = (
+        market.get("stock_day_report") if isinstance(market, dict) else {}
+    )
     portfolio_scorecard = (
         market_scorecards.get("portfolio_total")
-        if isinstance(market_scorecards, dict) and isinstance(market_scorecards.get("portfolio_total"), dict)
+        if isinstance(market_scorecards, dict)
+        and isinstance(market_scorecards.get("portfolio_total"), dict)
         else {}
     )
     stock_scorecard = (
         market_scorecards.get("stocks")
-        if isinstance(market_scorecards, dict) and isinstance(market_scorecards.get("stocks"), dict)
+        if isinstance(market_scorecards, dict)
+        and isinstance(market_scorecards.get("stocks"), dict)
         else {}
     )
     crypto_scorecard = (
         market_scorecards.get("crypto")
-        if isinstance(market_scorecards, dict) and isinstance(market_scorecards.get("crypto"), dict)
+        if isinstance(market_scorecards, dict)
+        and isinstance(market_scorecards.get("crypto"), dict)
         else {}
     )
     position_details = _extract_position_details(
         market_payload=market,
         stock_day_report=market_stock_day,
+    )
+    previous_summary, previous_summary_path = _load_previous_arm_summary(
+        artifact_root=artifact_root,
+        arm=arm,
+        current_date_slug=date_slug,
+    )
+    previous_stocks = (
+        previous_summary.get("stocks")
+        if isinstance(previous_summary, dict)
+        and isinstance(previous_summary.get("stocks"), dict)
+        else None
+    )
+    previous_crypto = (
+        previous_summary.get("crypto")
+        if isinstance(previous_summary, dict)
+        and isinstance(previous_summary.get("crypto"), dict)
+        else None
+    )
+    market_stock_day_summary = (
+        market_stock_day.get("summary")
+        if isinstance(market_stock_day, dict)
+        and isinstance(market_stock_day.get("summary"), dict)
+        else {}
+    )
+    stocks_session = _build_session_delta_scorecard(
+        current_scorecard=stock_scorecard,
+        previous_scorecard=previous_stocks,
+        realized_override=_safe_float(market_stock_day_summary.get("realized_pnl_usd")),
+        fees_override=_safe_float(market_stock_day_summary.get("fees_usd")),
+        fills_override=_safe_int(market_stock_day_summary.get("fills")),
+    )
+    crypto_session = _build_session_delta_scorecard(
+        current_scorecard=crypto_scorecard,
+        previous_scorecard=previous_crypto,
+    )
+    portfolio_session = _combine_session_scorecards(
+        stocks_session=stocks_session,
+        crypto_session=crypto_session,
     )
     telemetry_validity = _build_telemetry_validity(
         market_payload=market,
@@ -450,8 +668,8 @@ def _capture_arm(
         min_crypto_fills_for_eth_on=min_crypto_fills_for_eth_on,
     )
     session_validity = _build_session_validity(
-        portfolio_scorecard=portfolio_scorecard,
-        stock_scorecard=stock_scorecard,
+        portfolio_session_scorecard=portfolio_session,
+        stock_session_scorecard=stocks_session,
         rubric_payload=rubric_payload,
         min_total_fills=min_total_fills,
         min_stock_fills=min_stock_fills,
@@ -471,17 +689,28 @@ def _capture_arm(
         "session_validity": session_validity,
         "telemetry_validity": telemetry_validity,
         "acceptance_gates": {
-            "overall_pass": advisor_gates.get("overall_pass") if isinstance(advisor_gates, dict) else None,
+            "overall_pass": (
+                advisor_gates.get("overall_pass")
+                if isinstance(advisor_gates, dict)
+                else None
+            ),
             "critical_failures": (
                 advisor_gates.get("critical_failures")
-                if isinstance(advisor_gates, dict) and isinstance(advisor_gates.get("critical_failures"), list)
+                if isinstance(advisor_gates, dict)
+                and isinstance(advisor_gates.get("critical_failures"), list)
                 else []
             ),
-            "gates": advisor_gates.get("gates") if isinstance(advisor_gates, dict) else [],
+            "gates": (
+                advisor_gates.get("gates") if isinstance(advisor_gates, dict) else []
+            ),
         },
         "advisor_state": {
-            "portfolio_posture": advisor.get("portfolio_posture") if isinstance(advisor, dict) else None,
-            "decision_locked": advisor.get("decision_locked") if isinstance(advisor, dict) else None,
+            "portfolio_posture": (
+                advisor.get("portfolio_posture") if isinstance(advisor, dict) else None
+            ),
+            "decision_locked": (
+                advisor.get("decision_locked") if isinstance(advisor, dict) else None
+            ),
             "ramp_decision": (
                 advisor_key_metrics.get("ramp_decision")
                 if isinstance(advisor_key_metrics, dict)
@@ -494,31 +723,49 @@ def _capture_arm(
             ),
         },
         "market_freshness": {
-            "all_symbols_fresh": market.get("all_symbols_fresh") if isinstance(market, dict) else None,
+            "all_symbols_fresh": (
+                market.get("all_symbols_fresh") if isinstance(market, dict) else None
+            ),
             "stale_symbols": (
                 market.get("stale_symbols")
-                if isinstance(market, dict) and isinstance(market.get("stale_symbols"), list)
+                if isinstance(market, dict)
+                and isinstance(market.get("stale_symbols"), list)
                 else []
             ),
             "last_market_data_update_at": (
-                market.get("last_market_data_update_at") if isinstance(market, dict) else None
+                market.get("last_market_data_update_at")
+                if isinstance(market, dict)
+                else None
             ),
         },
-        "portfolio": (
-            portfolio_scorecard
-        ),
-        "stocks": (
-            stock_scorecard
-        ),
-        "crypto": (
-            crypto_scorecard
-        ),
+        "portfolio": (portfolio_scorecard),
+        "stocks": (stock_scorecard),
+        "crypto": (crypto_scorecard),
+        "session_delta": {
+            "baseline_source": (
+                str(previous_summary_path)
+                if previous_summary_path is not None
+                else None
+            ),
+            "baseline_timestamp": (
+                previous_summary.get("timestamp")
+                if isinstance(previous_summary, dict)
+                else None
+            ),
+            "portfolio": portfolio_session,
+            "stocks": stocks_session,
+            "crypto": crypto_session,
+        },
         "alignment": {
             "advisor_signal_count": (
-                market_alignment.get("advisor_signal_count") if isinstance(market_alignment, dict) else None
+                market_alignment.get("advisor_signal_count")
+                if isinstance(market_alignment, dict)
+                else None
             ),
             "executed_trade_count": (
-                market_alignment.get("executed_trade_count") if isinstance(market_alignment, dict) else None
+                market_alignment.get("executed_trade_count")
+                if isinstance(market_alignment, dict)
+                else None
             ),
             "signal_execution_match_count": (
                 market_alignment.get("signal_execution_match_count")
@@ -548,7 +795,8 @@ def _capture_arm(
         },
         "stock_day_summary": (
             market_stock_day.get("summary")
-            if isinstance(market_stock_day, dict) and isinstance(market_stock_day.get("summary"), dict)
+            if isinstance(market_stock_day, dict)
+            and isinstance(market_stock_day.get("summary"), dict)
             else {}
         ),
         "equity_session_policy": (
@@ -591,7 +839,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    start_parser = subparsers.add_parser("start", help="switch environment to selected A/B arm")
+    start_parser = subparsers.add_parser(
+        "start", help="switch environment to selected A/B arm"
+    )
     start_parser.add_argument("--arm", choices=["eth_on", "eth_off"], required=True)
     start_parser.add_argument("--env-file", type=Path, default=default_env)
     start_parser.add_argument("--state-dir", type=Path, default=default_state)
@@ -600,7 +850,9 @@ def _build_parser() -> argparse.ArgumentParser:
     start_parser.add_argument("--reset-state", action="store_true")
     start_parser.add_argument("--no-sudo", action="store_true")
 
-    capture_parser = subparsers.add_parser("capture", help="capture telemetry artifact for selected arm")
+    capture_parser = subparsers.add_parser(
+        "capture", help="capture telemetry artifact for selected arm"
+    )
     capture_parser.add_argument("--arm", choices=["eth_on", "eth_off"], required=True)
     capture_parser.add_argument("--frontend-base-url", default="http://127.0.0.1:8088")
     capture_parser.add_argument("--artifact-root", type=Path, default=default_artifact)
@@ -654,10 +906,14 @@ def main() -> int:
                 frontend_base_url=args.frontend_base_url.rstrip("/"),
                 artifact_root=args.artifact_root.resolve(),
                 rubric_dir=args.rubric_dir.resolve(),
-                min_crypto_fills_for_eth_on=max(int(args.min_crypto_fills_for_eth_on), 0),
+                min_crypto_fills_for_eth_on=max(
+                    int(args.min_crypto_fills_for_eth_on), 0
+                ),
                 min_total_fills=max(int(args.min_total_fills), 0),
                 min_stock_fills=max(int(args.min_stock_fills), 0),
-                min_market_hours_checkpoints=max(int(args.min_market_hours_checkpoints), 0),
+                min_market_hours_checkpoints=max(
+                    int(args.min_market_hours_checkpoints), 0
+                ),
             )
     except Exception as exc:  # noqa: BLE001
         print(json.dumps({"ok": False, "error": str(exc)}, indent=2), file=sys.stderr)
