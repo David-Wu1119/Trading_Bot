@@ -249,6 +249,7 @@ def _build_session_delta_scorecard(
     realized_override: float | None = None,
     fees_override: float | None = None,
     fills_override: int | None = None,
+    trade_count_override: int | None = None,
 ) -> dict[str, Any]:
     baseline = previous_scorecard if isinstance(previous_scorecard, dict) else {}
 
@@ -285,17 +286,27 @@ def _build_session_delta_scorecard(
     if trades_reset:
         reset_fields.append("trade_count")
 
+    effective_fills = fills_override if fills_override is not None else fills_delta
+    effective_trade_count = (
+        trade_count_override if trade_count_override is not None else trades_delta
+    )
+
     return {
         "realized_pnl_usd": (
             realized_override if realized_override is not None else realized_delta
         ),
         "unrealized_pnl_usd": _safe_float(current_scorecard.get("unrealized_pnl_usd")),
         "fees_usd": fees_override if fees_override is not None else fees_delta,
-        "fills": fills_override if fills_override is not None else fills_delta,
-        "trade_count": trades_delta,
+        "fills": effective_fills,
+        "trade_count": effective_trade_count,
         "open_positions": _safe_int(current_scorecard.get("open_positions")),
         "baseline_available": previous_scorecard is not None,
         "baseline_reset_fields": reset_fields,
+        "trade_count_semantics": (
+            "session_trade_count"
+            if trade_count_override is not None
+            else "scorecard_trade_count_delta"
+        ),
     }
 
 
@@ -648,6 +659,7 @@ def _capture_arm(
         realized_override=_safe_float(market_stock_day_summary.get("realized_pnl_usd")),
         fees_override=_safe_float(market_stock_day_summary.get("fees_usd")),
         fills_override=_safe_int(market_stock_day_summary.get("fills")),
+        trade_count_override=_safe_int(market_stock_day_summary.get("fills")),
     )
     crypto_session = _build_session_delta_scorecard(
         current_scorecard=crypto_scorecard,
