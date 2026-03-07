@@ -349,6 +349,105 @@ def _combine_session_scorecards(
     }
 
 
+def _build_acceptance_gates_payload(advisor_gates: Any) -> dict[str, Any]:
+    if isinstance(advisor_gates, dict):
+        return {
+            "available": True,
+            "reason": None,
+            "overall_pass": advisor_gates.get("overall_pass"),
+            "critical_failures": (
+                advisor_gates.get("critical_failures")
+                if isinstance(advisor_gates.get("critical_failures"), list)
+                else []
+            ),
+            "gates": advisor_gates.get("gates") if isinstance(advisor_gates.get("gates"), list) else [],
+        }
+    return {
+        "available": False,
+        "reason": "advisor_payload_missing_acceptance_gates",
+        "overall_pass": None,
+        "critical_failures": [],
+        "gates": [],
+    }
+
+
+def _build_advisor_state_payload(
+    *,
+    advisor_payload: Any,
+    advisor_key_metrics: Any,
+) -> dict[str, Any]:
+    if isinstance(advisor_payload, dict):
+        return {
+            "available": True,
+            "reason": None,
+            "portfolio_posture": advisor_payload.get("portfolio_posture"),
+            "decision_locked": advisor_payload.get("decision_locked"),
+            "ramp_decision": (
+                advisor_key_metrics.get("ramp_decision")
+                if isinstance(advisor_key_metrics, dict)
+                else None
+            ),
+            "approval_rate": (
+                advisor_key_metrics.get("approval_rate")
+                if isinstance(advisor_key_metrics, dict)
+                else None
+            ),
+        }
+    return {
+        "available": False,
+        "reason": "advisor_payload_unavailable",
+        "portfolio_posture": None,
+        "decision_locked": None,
+        "ramp_decision": None,
+        "approval_rate": None,
+    }
+
+
+def _build_alignment_payload(
+    *,
+    market_alignment: Any,
+    advisor_alignment: Any,
+) -> dict[str, Any]:
+    alignment = market_alignment if isinstance(market_alignment, dict) else advisor_alignment
+    if isinstance(alignment, dict):
+        return {
+            "available": True,
+            "reason": None,
+            "source": (
+                "market.advisor_execution_alignment"
+                if isinstance(market_alignment, dict)
+                else "advisor.execution_alignment"
+            ),
+            "advisor_signal_count": alignment.get("advisor_signal_count"),
+            "executed_trade_count": alignment.get("executed_trade_count"),
+            "signal_execution_match_count": alignment.get("signal_execution_match_count"),
+            "signal_execution_utilization_rate": alignment.get(
+                "signal_execution_utilization_rate"
+            ),
+            "median_execution_lag_seconds": alignment.get(
+                "median_execution_lag_seconds"
+            ),
+            "unmatched_advisor_signal_count": alignment.get(
+                "unmatched_advisor_signal_count"
+            ),
+            "executed_without_advisor_signal_count": alignment.get(
+                "executed_without_advisor_signal_count"
+            ),
+        }
+    return {
+        "available": False,
+        "reason": "alignment_unavailable_from_market_and_advisor",
+        "source": None,
+        "advisor_signal_count": None,
+        "executed_trade_count": None,
+        "signal_execution_match_count": None,
+        "signal_execution_utilization_rate": None,
+        "median_execution_lag_seconds": None,
+        "unmatched_advisor_signal_count": None,
+        "executed_without_advisor_signal_count": None,
+    }
+
+
 def _build_telemetry_validity(
     *,
     market_payload: dict[str, Any],
@@ -601,6 +700,9 @@ def _capture_arm(
     advisor_key_metrics = (
         advisor.get("key_metrics") if isinstance(advisor, dict) else {}
     )
+    advisor_alignment = (
+        advisor.get("execution_alignment") if isinstance(advisor, dict) else {}
+    )
     market_scorecards = market.get("scorecards") if isinstance(market, dict) else {}
     market_alignment = (
         market.get("advisor_execution_alignment") if isinstance(market, dict) else {}
@@ -700,40 +802,11 @@ def _capture_arm(
         "ab_validity": ab_validity,
         "session_validity": session_validity,
         "telemetry_validity": telemetry_validity,
-        "acceptance_gates": {
-            "overall_pass": (
-                advisor_gates.get("overall_pass")
-                if isinstance(advisor_gates, dict)
-                else None
-            ),
-            "critical_failures": (
-                advisor_gates.get("critical_failures")
-                if isinstance(advisor_gates, dict)
-                and isinstance(advisor_gates.get("critical_failures"), list)
-                else []
-            ),
-            "gates": (
-                advisor_gates.get("gates") if isinstance(advisor_gates, dict) else []
-            ),
-        },
-        "advisor_state": {
-            "portfolio_posture": (
-                advisor.get("portfolio_posture") if isinstance(advisor, dict) else None
-            ),
-            "decision_locked": (
-                advisor.get("decision_locked") if isinstance(advisor, dict) else None
-            ),
-            "ramp_decision": (
-                advisor_key_metrics.get("ramp_decision")
-                if isinstance(advisor_key_metrics, dict)
-                else None
-            ),
-            "approval_rate": (
-                advisor_key_metrics.get("approval_rate")
-                if isinstance(advisor_key_metrics, dict)
-                else None
-            ),
-        },
+        "acceptance_gates": _build_acceptance_gates_payload(advisor_gates),
+        "advisor_state": _build_advisor_state_payload(
+            advisor_payload=advisor,
+            advisor_key_metrics=advisor_key_metrics,
+        ),
         "market_freshness": {
             "all_symbols_fresh": (
                 market.get("all_symbols_fresh") if isinstance(market, dict) else None
@@ -768,43 +841,10 @@ def _capture_arm(
             "stocks": stocks_session,
             "crypto": crypto_session,
         },
-        "alignment": {
-            "advisor_signal_count": (
-                market_alignment.get("advisor_signal_count")
-                if isinstance(market_alignment, dict)
-                else None
-            ),
-            "executed_trade_count": (
-                market_alignment.get("executed_trade_count")
-                if isinstance(market_alignment, dict)
-                else None
-            ),
-            "signal_execution_match_count": (
-                market_alignment.get("signal_execution_match_count")
-                if isinstance(market_alignment, dict)
-                else None
-            ),
-            "signal_execution_utilization_rate": (
-                market_alignment.get("signal_execution_utilization_rate")
-                if isinstance(market_alignment, dict)
-                else None
-            ),
-            "median_execution_lag_seconds": (
-                market_alignment.get("median_execution_lag_seconds")
-                if isinstance(market_alignment, dict)
-                else None
-            ),
-            "unmatched_advisor_signal_count": (
-                market_alignment.get("unmatched_advisor_signal_count")
-                if isinstance(market_alignment, dict)
-                else None
-            ),
-            "executed_without_advisor_signal_count": (
-                market_alignment.get("executed_without_advisor_signal_count")
-                if isinstance(market_alignment, dict)
-                else None
-            ),
-        },
+        "alignment": _build_alignment_payload(
+            market_alignment=market_alignment,
+            advisor_alignment=advisor_alignment,
+        ),
         "stock_day_summary": (
             market_stock_day.get("summary")
             if isinstance(market_stock_day, dict)
